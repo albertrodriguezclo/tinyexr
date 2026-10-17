@@ -7153,6 +7153,15 @@ static bool PrecalculateTileInfo(std::vector<int>& num_x_tiles,
   return true;
 }
 
+// Each chunk has an 8-byte entry in the offset table, so the table can never
+// have more entries than the bytes left in the file can hold. Check this
+// before sizing the table from an untrusted `chunkCount`.
+static bool OffsetTableFits(tinyexr_int64 num_entries, size_t remaining) {
+  if (num_entries < 0) return false;
+  return static_cast<tinyexr_uint64>(num_entries) <=
+         static_cast<tinyexr_uint64>(remaining / sizeof(tinyexr_uint64));
+}
+
 static void InitSingleResolutionOffsets(OffsetData& offset_data, size_t num_blocks) {
   offset_data.offsets.resize(1);
   offset_data.offsets[0].resize(1);
@@ -7523,6 +7532,13 @@ static int DecodeEXRImage(EXRImage *exr_image, const EXRHeader *exr_header,
     }
   } else if (exr_header->chunk_count > 0) {
     // Use `chunkCount` attribute.
+    if (marker < head || marker > head + size ||
+        !OffsetTableFits(exr_header->chunk_count,
+                         size - static_cast<size_t>(marker - head))) {
+      tinyexr::SetErrorMessage(
+          "chunkCount exceeds the offset table size the file can hold.", err);
+      return TINYEXR_ERROR_INVALID_DATA;
+    }
     num_blocks = static_cast<size_t>(exr_header->chunk_count);
     InitSingleResolutionOffsets(offset_data, num_blocks);
   } else {
@@ -10849,6 +10865,16 @@ int LoadEXRMultipartImageFromMemory(EXRImage *exr_images,
     chunk_offset_table_list.resize(chunk_offset_table_list.size() + 1);
     tinyexr::OffsetData& offset_data = chunk_offset_table_list.back();
     if (!exr_headers[i]->tiled || exr_headers[i]->tile_level_mode == TINYEXR_TILE_ONE_LEVEL) {
+      const unsigned char *table =
+          reinterpret_cast<const unsigned char *>(marker);
+      if (table < memory || table > memory + size ||
+          !tinyexr::OffsetTableFits(
+              exr_headers[i]->chunk_count,
+              size - static_cast<size_t>(table - memory))) {
+        tinyexr::SetErrorMessage(
+            "chunkCount exceeds the offset table size the file can hold.", err);
+        return TINYEXR_ERROR_INVALID_DATA;
+      }
       tinyexr::InitSingleResolutionOffsets(offset_data, size_t(exr_headers[i]->chunk_count));
       std::vector<tinyexr::tinyexr_uint64>& offset_table = offset_data.offsets[0][0];
 
@@ -10876,6 +10902,15 @@ int LoadEXRMultipartImageFromMemory(EXRImage *exr_images,
         int num_blocks = InitTileOffsets(offset_data, exr_headers[i], num_x_tiles, num_y_tiles);
         if (num_blocks != exr_headers[i]->chunk_count) {
           tinyexr::SetErrorMessage("Invalid offset table size.", err);
+          return TINYEXR_ERROR_INVALID_DATA;
+        }
+        const unsigned char *table =
+            reinterpret_cast<const unsigned char *>(marker);
+        if (table < memory || table > memory + size ||
+            !tinyexr::OffsetTableFits(
+                num_blocks, size - static_cast<size_t>(table - memory))) {
+          tinyexr::SetErrorMessage(
+              "Insufficient data size in offset table.", err);
           return TINYEXR_ERROR_INVALID_DATA;
         }
       }
